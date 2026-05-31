@@ -1,0 +1,8 @@
+/dist/
+/tuistream
+/smoketest
+*.test
+*.out
+# internal working notes — not shipped
+/NEXT_PHASE.md
+/scratch/
