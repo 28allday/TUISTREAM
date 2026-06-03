@@ -253,7 +253,13 @@ fi
 OPTS="defaults,nofail,x-gvfs-show,x-gvfs-name=$LABEL"
 LINE="UUID=${UUID}  ${MP}  btrfs  ${OPTS}  0  0"
 
-grep -qF -- "$LINE" /etc/fstab || printf '%%s\n' "$LINE" >> /etc/fstab
+# Drop any stale entries for this mount point first (e.g. the UUID of a pool
+# that has since been recreated). Duplicate mount points make
+# systemd-fstab-generator keep only the FIRST line — if that one is stale the
+# pool never mounts at boot and shows up as detached again every reboot.
+awk -v mp="$MP" '$0 ~ /^[[:space:]]*#/ || $2 != mp' /etc/fstab > /etc/fstab.tuistream \
+  && cat /etc/fstab.tuistream > /etc/fstab && rm -f /etc/fstab.tuistream
+printf '%%s\n' "$LINE" >> /etc/fstab
 echo "fstab: $LINE"
 `,
 			shellQuote(devs[0]),

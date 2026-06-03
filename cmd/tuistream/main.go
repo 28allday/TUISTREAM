@@ -23,10 +23,21 @@ import (
 	"tuistream/internal/tui"
 )
 
+// version is stamped at build time via:
+//
+//	-ldflags "-X main.version=v0.1.1"
+var version = "dev"
+
 func main() {
 	readOnly := flag.Bool("read-only", false,
 		"open the TUI without checking for root; only the inventory views work")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("tuistream", version)
+		return
+	}
 
 	if !*readOnly && os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr,

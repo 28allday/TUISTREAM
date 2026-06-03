@@ -199,7 +199,13 @@ case "$FS" in
 esac
 LINE="UUID=${UUID}  ${MP}  ${FS}  ${OPTS}  0  2"
 
-grep -qF -- "$LINE" /etc/fstab || printf '%%s\n' "$LINE" >> /etc/fstab
+# Drop any stale entries for this mount point first (e.g. the UUID of a drive
+# that has since been reformatted). Duplicate mount points make
+# systemd-fstab-generator keep only the FIRST line — if that one is stale the
+# drive never mounts at boot.
+awk -v mp="$MP" '$0 ~ /^[[:space:]]*#/ || $2 != mp' /etc/fstab > /etc/fstab.tuistream \
+  && cat /etc/fstab.tuistream > /etc/fstab && rm -f /etc/fstab.tuistream
+printf '%%s\n' "$LINE" >> /etc/fstab
 echo "fstab entry: $LINE"
 `,
 			shellQuote(target),

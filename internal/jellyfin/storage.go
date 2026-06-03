@@ -131,8 +131,13 @@ install -d %[2]s %[3]s`,
 		{
 			Title: "Add bind mounts to /etc/fstab",
 			Cmd: bashAsRoot(fmt.Sprintf(`
-grep -qsF ' %[2]s ' /etc/fstab || printf '%%s %%s none bind,x-systemd.requires-mounts-for=%[5]s 0 0\n' %[1]s %[2]s >> /etc/fstab
-grep -qsF ' %[4]s ' /etc/fstab || printf '%%s %%s none bind,x-systemd.requires-mounts-for=%[5]s 0 0\n' %[3]s %[4]s >> /etc/fstab`,
+# Drop any stale bind entries for these targets first (e.g. pointing at a
+# previous media drive) — duplicate mount points make systemd-fstab-generator
+# keep only the FIRST line, so a stale one would win at boot.
+awk -v a=%[2]s -v b=%[4]s '$0 ~ /^[[:space:]]*#/ || ($2 != a && $2 != b)' /etc/fstab > /etc/fstab.tuistream \
+  && cat /etc/fstab.tuistream > /etc/fstab && rm -f /etc/fstab.tuistream
+printf '%%s %%s none bind,x-systemd.requires-mounts-for=%[5]s 0 0\n' %[1]s %[2]s >> /etc/fstab
+printf '%%s %%s none bind,x-systemd.requires-mounts-for=%[5]s 0 0\n' %[3]s %[4]s >> /etc/fstab`,
 				shellQuote(data), defaultDataDir,
 				shellQuote(cache), defaultCacheDir,
 				mp)),
