@@ -16,6 +16,7 @@ import (
 	"tuistream/internal/drives"
 	"tuistream/internal/firewall"
 	"tuistream/internal/jellyfin"
+	"tuistream/internal/spindown"
 	"tuistream/internal/theme"
 )
 
@@ -68,6 +69,10 @@ type Model struct {
 	runStage    runStage
 	runOwnerTab tab
 
+	// spindownSyncing guards the silent spin-down default apply so a
+	// refresh mid-sync can't start a second one.
+	spindownSyncing bool
+
 	// spinner ticked while a step is running in the background.
 	spinner spinner.Model
 
@@ -107,6 +112,26 @@ func (m Model) Init() tea.Cmd {
 		cpuTickCmd(),
 		m.spinner.Tick,
 	)
+}
+
+type spindownSyncedMsg struct{ err error }
+
+// spindownAutoSyncCmd applies the spin-down default in the background when
+// it's due (spinning media drives present, no opt-out, rule missing or
+// stale). Returns nil — no work, no UI churn — in the common case where
+// the rule already matches.
+func (m *Model) spindownAutoSyncCmd() tea.Cmd {
+	if m.spindownSyncing || os.Geteuid() != 0 {
+		return nil
+	}
+	targets := spindownTargets(m.inventory)
+	if !spindown.AutoSyncDue(targets) {
+		return nil
+	}
+	m.spindownSyncing = true
+	return func() tea.Msg {
+		return spindownSyncedMsg{err: spindown.AutoSync(targets)}
+	}
 }
 
 // healthRefreshCmd builds the next health probe, including SMART only when
@@ -161,6 +186,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case inventoryLoadedMsg:
 		m.inventory = msg.inv
 		m.inventoryErr = msg.err
+		// Spin-down is a default, not a feature: whenever the fresh
+		// inventory shows spinning media drives that the udev rule doesn't
+		// cover yet (first run, or a drive was added), silently sync it —
+		// unless the user opted out via [s]. Root only; --read-only can't
+		// write rules.
+		return m, m.spindownAutoSyncCmd()
+
+	case spindownSyncedMsg:
+		m.spindownSyncing = false
+		if msg.err != nil {
+			m.flash = "Couldn't apply drive spin-down: " + msg.err.Error()
+		} else {
+			m.flash = fmt.Sprintf(
+				"Drive spin-down active — media drives sleep after %d min idle ([s] turns it off)",
+				spindown.TimeoutMinutes)
+		}
 		return m, nil
 
 	case statusLoadedMsg:

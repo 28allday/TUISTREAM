@@ -14,6 +14,11 @@ monitor, all without dropping you to a shell or switching terminals mid-task.
 - **Setup** — install / uninstall Jellyfin, open or close the firewall ports,
   copy the server's web address to your clipboard (works over SSH + tmux), and
   move Jellyfin's library storage onto a media drive.
+- **Drive spin-down by default** — spinning media drives are automatically put
+  to sleep after 3 idle minutes (cooler, quieter) by a tiny background watcher
+  that survives reboots — and works even on NAS drives that ignore their own
+  firmware idle timer (looking at you, WD Red). System drives are never
+  touched; `s` opts out if you want 24/7 spinning.
 - **Add media drive** — attach a spare disk or partition: keep its existing
   filesystem or format it (btrfs / ext4 / xfs), or combine 2+ disks into a
   **btrfs RAID pool** (1 / 0 / 5 / 10). The boot drive is never offered — the
@@ -89,6 +94,14 @@ A first-run, from an empty box to a working server — all from the **Setup** ta
 
 Optional: press `j` to move Jellyfin's own library database and metadata off the
 OS drive onto a media drive (handy on a small boot SSD).
+
+Note on **drive spin-down**: when TUISTREAM sees spinning media drives it
+automatically installs a small watcher service that spins them down after 3
+idle minutes, so they don't run hot 24/7. (It watches actual disk I/O rather
+than trusting the drive's own idle timer, which many NAS drives silently
+ignore.) The first play after a sleep takes a few seconds while the drives
+wake. Press `s` to opt out — TUISTREAM remembers and won't re-apply the
+default.
 
 ## Build from source
 

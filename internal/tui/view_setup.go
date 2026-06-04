@@ -8,6 +8,7 @@ import (
 
 	"tuistream/internal/drives"
 	"tuistream/internal/jellyfin"
+	"tuistream/internal/spindown"
 )
 
 // setupModel holds Setup-tab-specific state: the current sub-stage (idle,
@@ -15,11 +16,18 @@ import (
 // the root Model so they're shared with the Manage tab.
 type setupModel struct {
 	stage          setupStage
-	confirmIdx     int             // 0 = Yes, 1 = No (used by confirm modals)
-	firewallTarget bool            // true = "we're about to open", false = "we're about to close"
-	addDrive       addDriveState   // state for the multi-stage Add-drive flow
-	importPool     importPoolState // state for the import-existing-pool flow
-	showTech       bool            // 'd' toggle: false = friendly drive list, true = raw lsblk table
+	confirmIdx     int  // 0 = Yes, 1 = No (used by confirm modals)
+	firewallTarget bool // true = "we're about to open", false = "we're about to close"
+
+	// Drive spin-down flow: true = about to enable, false = about to
+	// disable; spindownDrives is the resolved target list shown on the
+	// confirm screen and fed to the plan.
+	spindownTarget bool
+	spindownDrives []spindown.Target
+
+	addDrive   addDriveState   // state for the multi-stage Add-drive flow
+	importPool importPoolState // state for the import-existing-pool flow
+	showTech   bool            // 'd' toggle: false = friendly drive list, true = raw lsblk table
 
 	// Move-Jellyfin-storage flow.
 	moveChoices []drives.Drive // managed media drives to choose from
@@ -47,6 +55,8 @@ func (s setupModel) view(m Model) string {
 		return renderConfirmUninstall(m.status, s.confirmIdx)
 	case stageConfirmFirewall:
 		return renderConfirmFirewall(m.firewall, m.setup.firewallTarget, s.confirmIdx)
+	case stageConfirmSpindown:
+		return renderConfirmSpindown(m.setup.spindownDrives, m.setup.spindownTarget, s.confirmIdx)
 	case stageAddDrive:
 		return renderAddDrive(m)
 	case stageImportPool:
@@ -61,7 +71,8 @@ func (s setupModel) view(m Model) string {
 	fw := renderFirewallLine(m.firewall)
 	jellyfinMoved := jellyfin.LoadStorageState().Moved
 	hasDetachedPool := len(m.inventory.DetachedPools()) > 0
-	actions := renderSetupActionBar(m.status.IsInstalled(), m.firewall.AllOpen(), m.status.ServiceActive, jellyfinMoved, hasDetachedPool, cardWidth(m.width))
+	spindownEligible := len(spindownTargets(m.inventory)) > 0
+	actions := renderSetupActionBar(m.status.IsInstalled(), m.firewall.AllOpen(), m.status.ServiceActive, jellyfinMoved, hasDetachedPool, spindownEligible, spindown.Enabled(), cardWidth(m.width))
 
 	var heading, subhead, inv string
 	if s.showTech {
@@ -77,13 +88,17 @@ func (s setupModel) view(m Model) string {
 	hint := headerStyle.Render(techToggleHint(s.showTech))
 
 	w := cardWidth(m.width)
+	headerLines := []string{centered(status, w), centered(fw, w)}
+	if spindownEligible {
+		headerLines = append(headerLines, centered(renderSpindownLine(), w))
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Center,
 		"",
 		centered(heading, w),
 		centered(subhead, w),
 		"",
-		centered(status, w),
-		centered(fw, w),
+		strings.Join(headerLines, "\n"),
 		"",
 		inv,
 		centered(hint, w),

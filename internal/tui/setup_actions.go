@@ -9,8 +9,10 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"tuistream/internal/drives"
 	"tuistream/internal/firewall"
 	"tuistream/internal/jellyfin"
+	"tuistream/internal/spindown"
 	"tuistream/internal/step"
 )
 
@@ -27,6 +29,7 @@ const (
 	stageConfirmInstall
 	stageConfirmUninstall
 	stageConfirmFirewall
+	stageConfirmSpindown
 	stageAddDrive
 	stageImportPool          // import an existing detached btrfs pool (see importPoolState)
 	stageMoveJellyfinPick    // choose which media drive to relocate onto (2+ managed)
@@ -158,6 +161,8 @@ func handleSetupKey(m Model, msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return setupConfirmUninstallKey(m, key)
 	case stageConfirmFirewall:
 		return setupConfirmFirewallKey(m, key)
+	case stageConfirmSpindown:
+		return setupConfirmSpindownKey(m, key)
 	case stageAddDrive:
 		return setupAddDriveKey(m, msg)
 	case stageImportPool:
@@ -207,6 +212,21 @@ func setupIdleKey(m Model, key string) (Model, tea.Cmd, bool) {
 	case "f":
 		m.setup.firewallTarget = !m.firewall.AllOpen()
 		m.setup.stage = stageConfirmFirewall
+		m.setup.confirmIdx = 0
+		return m, nil, true
+	case "s":
+		if m.inventory == nil {
+			m.flash = "Inventory still loading — press 'r' once it's done."
+			return m, nil, true
+		}
+		targets := spindownTargets(m.inventory)
+		if len(targets) == 0 {
+			m.flash = "No spinning media drives detected — nothing to spin down."
+			return m, nil, true
+		}
+		m.setup.spindownDrives = targets
+		m.setup.spindownTarget = !spindown.Enabled()
+		m.setup.stage = stageConfirmSpindown
 		m.setup.confirmIdx = 0
 		return m, nil, true
 	case "j":
@@ -273,6 +293,54 @@ func runFirewall(m Model) (Model, tea.Cmd, bool) {
 	m.runStage = runRunning
 	m.runOwnerTab = tabSetup
 	return m, runStepCmd(plan[0]), true
+}
+
+func setupConfirmSpindownKey(m Model, key string) (Model, tea.Cmd, bool) {
+	switch key {
+	case "left", "h":
+		m.setup.confirmIdx = 0
+		return m, nil, true
+	case "right", "l":
+		m.setup.confirmIdx = 1
+		return m, nil, true
+	case "y", "Y":
+		m.setup.confirmIdx = 0
+		return runSpindown(m)
+	case "n", "N", "esc":
+		m.setup.stage = stageIdle
+		return m, nil, true
+	case "enter":
+		if m.setup.confirmIdx == 0 {
+			return runSpindown(m)
+		}
+		m.setup.stage = stageIdle
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func runSpindown(m Model) (Model, tea.Cmd, bool) {
+	var plan []step.Step
+	title := ""
+	if m.setup.spindownTarget {
+		plan = spindown.EnablePlan(m.setup.spindownDrives)
+		title = fmt.Sprintf("Enabling drive spin-down (%d min idle)", spindown.TimeoutMinutes)
+	} else {
+		plan = spindown.DisablePlan(m.setup.spindownDrives)
+		title = "Disabling drive spin-down"
+	}
+	m.setup.stage = stageIdle
+	m.run = planRun{title: title, steps: plan, index: 0}
+	m.runStage = runRunning
+	m.runOwnerTab = tabSetup
+	return m, runStepCmd(plan[0]), true
+}
+
+// spindownTargets picks the disks the spin-down watcher may touch. The
+// selection logic lives in the spindown package (the watcher daemon uses
+// the same rules); this is just the nil-tolerant TUI entry point.
+func spindownTargets(inv *drives.Inventory) []spindown.Target {
+	return spindown.Targets(inv)
 }
 
 // setupStartMoveJellyfin gates entry into the move-storage flow and routes to
@@ -490,7 +558,7 @@ func dismissRun(m Model) (Model, tea.Cmd) {
 
 // renderSetupActionBar shows the keyboard shortcuts at the bottom of the
 // idle setup view. The set of keys depends on current install + firewall state.
-func renderSetupActionBar(installed, fwOpen, serviceActive, jellyfinMoved, hasDetachedPool bool, width int) string {
+func renderSetupActionBar(installed, fwOpen, serviceActive, jellyfinMoved, hasDetachedPool, spindownEligible, spindownOn bool, width int) string {
 	var keys []string
 	if installed {
 		keys = append(keys, "[i] reinstall")
@@ -506,6 +574,13 @@ func renderSetupActionBar(installed, fwOpen, serviceActive, jellyfinMoved, hasDe
 		keys = append(keys, "[f] close firewall")
 	} else {
 		keys = append(keys, "[f] open firewall")
+	}
+	if spindownEligible {
+		if spindownOn {
+			keys = append(keys, "[s] turn off spin-down")
+		} else {
+			keys = append(keys, "[s] re-enable spin-down")
+		}
 	}
 	if installed {
 		if jellyfinMoved {
@@ -568,6 +643,68 @@ func renderConfirmFirewall(s firewall.State, opening bool, idx int) string {
 	if !s.UFWInstalled {
 		rows = append(rows, "")
 		rows = append(rows, roleSystemStyle.Render("UFW isn't installed — nothing to do."))
+	}
+	rows = append(rows, "")
+	yes := "  Yes  "
+	no := "  Cancel  "
+	if idx == 0 {
+		yes = roleAvailableStyle.Render("▸" + yes)
+		no = "  " + no
+	} else {
+		yes = "  " + yes
+		no = roleSystemStyle.Render("▸" + no)
+	}
+	rows = append(rows, yes+"   "+no)
+	rows = append(rows, "")
+	rows = append(rows, footerStyle.Render("←/→ move · enter confirm · y / n shortcut · esc cancel"))
+	return centeredCard(strings.Join(rows, "\n"))
+}
+
+// renderSpindownLine shows the idle-timer status in the Setup tab header.
+// Only rendered when at least one spinning media drive exists.
+func renderSpindownLine() string {
+	if spindown.Enabled() {
+		return labelStyle.Render("Spin-down:") + " " +
+			roleAvailableStyle.Render(fmt.Sprintf("drives sleep after %d min idle", spindown.TimeoutMinutes))
+	}
+	if spindown.OptedOut() {
+		return labelStyle.Render("Spin-down:") + " " +
+			headerStyle.Render("off by your choice — drives run 24/7 ([s] re-enables)")
+	}
+	return labelStyle.Render("Spin-down:") + " " +
+		headerStyle.Render("off — applying default shortly…")
+}
+
+// renderConfirmSpindown shows the enable/disable confirmation modal with
+// the exact drives the timer will touch.
+func renderConfirmSpindown(targets []spindown.Target, enabling bool, idx int) string {
+	var rows []string
+	verb := "Re-enable"
+	desc := fmt.Sprintf(
+		"Spin these drives down after %d minutes of inactivity (the TUISTREAM default). They run cooler and quieter; the first play after a sleep takes a few seconds while they wake.",
+		spindown.TimeoutMinutes)
+	if !enabling {
+		verb = "Turn off"
+		desc = "Remove the idle timer — drives return to their factory behaviour (NAS drives spin 24/7). TUISTREAM remembers this and won't re-apply the default."
+	}
+	rows = append(rows, titleStyle.Render(verb+" drive spin-down?"))
+	rows = append(rows, "")
+	rows = append(rows, desc)
+	rows = append(rows, "")
+	rows = append(rows, "Drives:")
+	for _, t := range targets {
+		name := t.Model
+		if name == "" {
+			name = t.Name
+		}
+		rows = append(rows, "  · "+devNameStyle.Render(name)+"   ("+t.Device+")")
+	}
+	if enabling {
+		rows = append(rows, "")
+		rows = append(rows, headerStyle.Render(
+			"A small background service watches for idle drives — works across reboots,"))
+		rows = append(rows, headerStyle.Render(
+			"even on drives that ignore their own firmware timer. System drives are never touched."))
 	}
 	rows = append(rows, "")
 	yes := "  Yes  "

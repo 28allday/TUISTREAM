@@ -34,6 +34,7 @@ var Required = []Dep{
 	{Pkg: "gptfdisk", Binary: "sgdisk"},        // Setup > wipe-whole-disk
 	{Pkg: "parted", Binary: "partprobe"},       // Setup > partprobe after wipe
 	{Pkg: "smartmontools", Binary: "smartctl"}, // Monitor > SMART health per disk
+	{Pkg: "hdparm", Binary: "hdparm"},          // Setup > drive spin-down timer
 }
 
 // Missing returns the subset of Required whose binary isn't on $PATH.

@@ -18,6 +18,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"tuistream/internal/spindown"
 	"tuistream/internal/system"
 	"tuistream/internal/theme"
 	"tuistream/internal/tui"
@@ -32,10 +33,25 @@ func main() {
 	readOnly := flag.Bool("read-only", false,
 		"open the TUI without checking for root; only the inventory views work")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	spindownWatch := flag.Bool("spindown-watch", false,
+		"internal: run the drive idle watcher (started by tuistream-spindown.service)")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("tuistream", version)
+		return
+	}
+
+	// Daemon mode: no TUI, just the idle watcher (root needed for hdparm).
+	if *spindownWatch {
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(os.Stderr, "tuistream --spindown-watch must run as root")
+			os.Exit(1)
+		}
+		if err := spindown.Watch(); err != nil {
+			fmt.Fprintln(os.Stderr, "tuistream:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
