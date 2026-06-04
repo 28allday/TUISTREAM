@@ -67,6 +67,7 @@ type DiskHealth struct {
 	Device      string // /dev/sda
 	Model       string
 	Transport   string // sata / usb / nvme
+	Standby     bool   // drive was in standby/sleep; we deliberately didn't wake it
 	SmartReady  bool
 	Passed      bool
 	TempC       int
@@ -222,7 +223,11 @@ func takeDisk(t DiskTarget) DiskHealth {
 		d.Note = "smartmontools not installed"
 		return d
 	}
-	args := []string{"-j", "-H", "-A", "-i", t.Device}
+	// -n standby: if the drive has spun down, do NOT wake it just to read
+	// SMART. Without this, every poll spins the drive back up, so it never
+	// reaches standby and runs (hot) 24/7. A standby drive is reported as
+	// such instead — which is itself a healthy sign.
+	args := []string{"-j", "-n", "standby", "-H", "-A", "-i", t.Device}
 	// USB bridges often need a device-type hint; without it smartctl
 	// bails. Try sat for USB SATA bridges.
 	if t.Transport == "usb" {
@@ -241,6 +246,17 @@ func takeDisk(t DiskTarget) DiskHealth {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		d.Note = "couldn't parse smartctl JSON"
 		return d
+	}
+	// `-n standby` reports a sleeping drive via a message like
+	// "Device is in STANDBY mode, exit(2)". Surface that as its own state
+	// rather than "SMART not available".
+	for _, m := range parsed.Smartctl.Messages {
+		up := strings.ToUpper(m.String)
+		if strings.Contains(up, "STANDBY") || strings.Contains(up, "SLEEP") {
+			d.Standby = true
+			d.Note = "in standby — not woken for SMART"
+			return d
+		}
 	}
 	if parsed.ModelName != "" && d.Model == "" {
 		d.Model = parsed.ModelName

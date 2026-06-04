@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -93,19 +94,40 @@ func NewModel(t theme.Theme) Model {
 
 // Init is the Bubble Tea entry point. We kick off the first inventory load,
 // Jellyfin status check, and firewall snapshot asynchronously so the UI
-// paints immediately. The monitor tick fires on a 5s interval to refresh
-// the Monitor tab's health snapshot.
+// paints immediately. The monitor tick fires on a 5s interval but only
+// probes while the Monitor tab is visible (see monitorTickMsg).
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		loadInventoryCmd(m.username),
 		loadStatusCmd(),
 		loadFirewallCmd(),
-		loadHealthCmd(m.inventory),
+		loadHealthCmd(m.inventory, false),
 		monitorTickCmd(),
 		cpuSampleCmd(nil), // seed the previous-sample slot
 		cpuTickCmd(),
 		m.spinner.Tick,
 	)
+}
+
+// healthRefreshCmd builds the next health probe, including SMART only when
+// its slower cadence is due. Marks lastSmart at issue time so an in-flight
+// probe isn't doubled up by the next tick.
+func (m *Model) healthRefreshCmd() tea.Cmd {
+	withSmart := time.Since(m.monitor.lastSmart) >= smartRefresh
+	if withSmart {
+		m.monitor.lastSmart = time.Now()
+	}
+	return loadHealthCmd(m.inventory, withSmart)
+}
+
+// enteredMonitorCmd fires an immediate health probe when a tab switch lands
+// on Monitor, so the user isn't staring at a stale snapshot until the next
+// 5s tick.
+func (m *Model) enteredMonitorCmd() tea.Cmd {
+	if m.currentTab != tabMonitor {
+		return nil
+	}
+	return m.healthRefreshCmd()
 }
 
 type firewallLoadedMsg struct{ state firewall.State }
@@ -151,13 +173,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case healthLoadedMsg:
+		if msg.snap != nil {
+			if msg.withSmart {
+				// Fresh SMART rows — update the cache.
+				m.monitor.smartCache = msg.snap.Disks
+			} else {
+				// Cheap refresh — carry the cached SMART rows forward so
+				// the drive table doesn't flicker empty between probes.
+				msg.snap.Disks = m.monitor.smartCache
+			}
+		}
 		m.monitor.snap = msg.snap
 		m.monitor.err = msg.err
 		return m, nil
 
 	case monitorTickMsg:
-		// Refresh on tick. Always re-arm so the next tick fires.
-		return m, tea.Batch(loadHealthCmd(m.inventory), monitorTickCmd())
+		// Always re-arm so the tick keeps firing, but only probe while the
+		// Monitor tab is visible — polling SMART from the other tabs kept
+		// drives awake (and hot) for nothing. SMART itself runs on its own
+		// slower cadence even when the tab is up.
+		if m.currentTab != tabMonitor {
+			return m, monitorTickCmd()
+		}
+		return m, tea.Batch(m.healthRefreshCmd(), monitorTickCmd())
 
 	case cpuTickMsg:
 		return m, tea.Batch(cpuSampleCmd(m.monitor.cpuPrev), cpuTickCmd())
@@ -229,13 +267,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "tab", "right":
 			m.currentTab = (m.currentTab + 1) % tabCount
-			return m, nil
+			return m, m.enteredMonitorCmd()
 		case "shift+tab", "left":
 			m.currentTab = (m.currentTab + tabCount - 1) % tabCount
-			return m, nil
+			return m, m.enteredMonitorCmd()
 		case "r":
 			m.flash = "Refreshing…"
-			return m, tea.Batch(loadInventoryCmd(m.username), loadStatusCmd(), loadFirewallCmd())
+			return m, tea.Batch(loadInventoryCmd(m.username), loadStatusCmd(),
+				loadFirewallCmd(), m.enteredMonitorCmd())
 		}
 
 		// Idle Setup-tab keys ('i' install, 'u' uninstall, 'a' add drive, 'f' firewall)

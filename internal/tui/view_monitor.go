@@ -1,8 +1,10 @@
 // Monitor tab — a refreshing dashboard of the host's health.
 //
-// Drives, btrfs pools, SMART, CPU + memory, Jellyfin service. Updates
-// every 5 seconds via tea.Tick. Re-uses the inventory we already track
-// for the other tabs to pick which mountpoints/disks to probe.
+// Drives, btrfs pools, SMART, CPU + memory, Jellyfin service. The cheap
+// probes refresh every 5 seconds via tea.Tick — but only while this tab is
+// visible — and SMART runs on its own slower cadence so polling never keeps
+// the drives awake. Re-uses the inventory we already track for the other
+// tabs to pick which mountpoints/disks to probe.
 package tui
 
 import (
@@ -24,6 +26,13 @@ import (
 type monitorModel struct {
 	snap *health.Snapshot
 	err  error
+
+	// SMART runs on its own slow cadence (smartRefresh) because polling
+	// smartctl keeps drives busy — lastSmart is when we last probed,
+	// smartCache carries the disk rows across the cheap refreshes in
+	// between.
+	lastSmart  time.Time
+	smartCache []health.DiskHealth
 
 	// CPU sampling: prev holds the last /proc/stat snapshot so the next
 	// tick can compute deltas. usage is the most recent % per core +
@@ -58,11 +67,20 @@ func (m Model) WithCPU(u health.CPUUsage, history [][]float64) Model {
 type healthLoadedMsg struct {
 	snap *health.Snapshot
 	err  error
+	// withSmart records whether this snapshot included a SMART probe, so
+	// the Update loop knows to refresh or reuse the cached disk rows.
+	withSmart bool
 }
 
 type monitorTickMsg struct{}
 
 const monitorRefresh = 5 * time.Second
+
+// smartRefresh is the SMART-probe cadence. Deliberately much slower than
+// monitorRefresh: SMART data barely changes second-to-second, and hammering
+// smartctl keeps drives awake (and hot). Cheap probes (statfs, /proc,
+// systemd) stay on the 5s tick.
+const smartRefresh = 60 * time.Second
 
 func monitorTickCmd() tea.Cmd {
 	return tea.Tick(monitorRefresh, func(time.Time) tea.Msg {
@@ -102,12 +120,16 @@ func cpuSampleCmd(prev []health.ProcStatLine) tea.Cmd {
 // loadHealthCmd derives the health Inputs from the current inventory and
 // kicks off a snapshot in the background. If inventory hasn't loaded
 // yet we still take a snapshot — system/jellyfin/cpu sections work
-// without it.
-func loadHealthCmd(inv *drives.Inventory) tea.Cmd {
+// without it. withSmart=false drops the physical disks from the probe so
+// smartctl isn't run; the Update loop re-attaches the cached rows.
+func loadHealthCmd(inv *drives.Inventory, withSmart bool) tea.Cmd {
 	in := healthInputsFrom(inv)
+	if !withSmart {
+		in.PhysicalDisks = nil
+	}
 	return func() tea.Msg {
 		s := health.Take(in)
-		return healthLoadedMsg{snap: &s}
+		return healthLoadedMsg{snap: &s, withSmart: withSmart}
 	}
 }
 
@@ -186,6 +208,7 @@ func (mn monitorModel) view(m Model) string {
 	heading := titleStyle.Render("System health")
 	subhead := headerStyle.Render(
 		"Refreshing every " + monitorRefresh.String() +
+			" · SMART every " + smartRefresh.String() +
 			" · last update " + snap.Time.Format("15:04:05"))
 
 	w := cardWidth(m.width)
@@ -507,6 +530,10 @@ func renderDiskCard(s *health.Snapshot) string {
 	for _, d := range s.Disks {
 		var smart string
 		switch {
+		case d.Standby:
+			// Drive is asleep and we deliberately didn't wake it — a good
+			// sign, not a missing reading.
+			smart = headerStyle.Render("asleep")
 		case !d.SmartReady:
 			smart = roleInUseStyle.Render("n/a")
 		case d.Passed:
