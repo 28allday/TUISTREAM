@@ -14,6 +14,12 @@ monitor, all without dropping you to a shell or switching terminals mid-task.
 - **Setup** — install / uninstall Jellyfin, open or close the firewall ports,
   copy the server's web address to your clipboard (works over SSH + tmux), and
   move Jellyfin's library storage onto a media drive.
+- **Hardware transcoding ready out of the box** — the installer detects the
+  machine's GPU (Intel / AMD / NVIDIA) and installs the matching encoding
+  packages (Intel QSV/VA-API, AMD VA-API) so clients that need a transcode
+  don't hit "fatal playback error". NVIDIA NVENC needs only the driver you
+  already have; if no NVIDIA driver is loaded the installer says so rather
+  than guessing which kernel driver to install.
 - **Drive spin-down by default** — spinning media drives are automatically put
   to sleep after 3 idle minutes (cooler, quieter) by a tiny background watcher
   that survives reboots — and works even on NAS drives that ignore their own

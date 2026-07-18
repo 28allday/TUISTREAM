@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"tuistream/internal/step"
+	"tuistream/internal/system"
 )
 
 // InstallPlan builds the ordered list of commands needed to install Jellyfin
@@ -14,7 +15,7 @@ import (
 // This is a *plan*, not an execution. The TUI runs it step by step via
 // tea.ExecProcess so pacman can prompt interactively if needed.
 func InstallPlan() []step.Step {
-	return []step.Step{
+	steps := []step.Step{
 		{
 			Title: "Refresh package databases",
 			Cmd:   exec.Command("pacman", "-Sy", "--noconfirm"),
@@ -24,11 +25,53 @@ func InstallPlan() []step.Step {
 			Cmd: exec.Command("pacman", "-S", "--needed", "--noconfirm",
 				"jellyfin-server", "jellyfin-web", "jellyfin-ffmpeg"),
 		},
-		{
-			Title: "Enable and start jellyfin.service",
-			Cmd:   exec.Command("systemctl", "enable", "--now", "jellyfin.service"),
-		},
 	}
+	steps = append(steps, gpuEncodingSteps()...)
+	return append(steps, step.Step{
+		Title: "Enable and start jellyfin.service",
+		Cmd:   exec.Command("systemctl", "enable", "--now", "jellyfin.service"),
+	})
+}
+
+// gpuEncodingSteps maps the host's GPU vendor(s) to the userspace packages
+// jellyfin-ffmpeg needs before hardware transcoding works on that vendor.
+// Without them Jellyfin installs and direct-plays fine, but the moment a
+// client needs a transcode every attempt dies at hw-init with the opaque
+// "FFmpeg exited with code 251" / fatal-playback-error combo.
+//
+// NVIDIA is deliberately conservative: NVENC needs only the driver's own
+// userspace (nvidia-utils), so with a loaded driver there is nothing to
+// add, and without one we won't auto-install a kernel driver from here —
+// picking nvidia vs nvidia-open vs -dkms per kernel flavour is a job for
+// the distro/user, and getting it wrong can break the box's boot.
+func gpuEncodingSteps() []step.Step {
+	var steps []step.Step
+	for _, v := range system.DetectGPUs() {
+		switch v {
+		case system.VendorIntel:
+			steps = append(steps, step.Step{
+				Title: "Install Intel QSV/VA-API encoding packages",
+				Cmd: exec.Command("pacman", "-S", "--needed", "--noconfirm",
+					"intel-media-driver", "vpl-gpu-rt", "intel-compute-runtime"),
+			})
+		case system.VendorAMD:
+			steps = append(steps, step.Step{
+				Title: "Install AMD VA-API encoding packages",
+				Cmd: exec.Command("pacman", "-S", "--needed", "--noconfirm",
+					"mesa", "libva-mesa-driver"),
+			})
+		case system.VendorNVIDIA:
+			if system.NvidiaDriverLoaded() {
+				continue
+			}
+			steps = append(steps, step.Step{
+				Title: "NVIDIA GPU found but no driver loaded — skipping NVENC setup",
+				Cmd: exec.Command("bash", "-lc",
+					`echo "Install the NVIDIA driver for your kernel (nvidia / nvidia-open / nvidia-lts) and reboot to enable NVENC transcoding."`),
+			})
+		}
+	}
+	return steps
 }
 
 // UninstallPlan reverses an install. Pass `purgeData` to also delete
